@@ -478,200 +478,140 @@ def extract_json_from_text(text: str):
             print(f"No se pudo extraer JSON de la respuesta de la IA: {text}")
             return []
 
-# EVALUACIÓN EXHAUSTIVA DE IA Y RoPA AUTOMÁTICA
-@router.post("/evaluate")
-async def evaluate_with_ai(
-    files: List[UploadFile] = File(default=None),
-    question_ids: str = Form(""),
-    evidence_ids: str = Form(""),  # documentos ya guardados en el Centro de Evidencias
-    current_user: dict = Depends(RequireRole(ELEVATED_WRITE)),
-    org_id: str = Depends(get_current_org),
-    db: AsyncSession = Depends(get_db)
-):
-    contexto = ""
+# EVALUACIÓN EXHAUSTIVA DE IA Y RoPA AUTOMÁTICA (en segundo plano)
+# =====================================================================
+# POST /evaluate        -> inicia un job y devuelve {job_id, total}
+# GET  /evaluate/{id}   -> estado: done/total, etapa y, al terminar, el
+#                          mismo resultado que antes {total, results,
+#                          extracted_treatments}
+# Ver app/services/question_evaluator.py (filtro por relevancia + contexto
+# por fragmentos + reintentos ante el límite de Groq).
+# =====================================================================
+from app.services import question_evaluator as qe
+from app.dependencies.database import AsyncSessionLocal
 
-    # Documentos GUARDADOS: usamos el texto ya indexado (EvidenceChunk) de las
-    # evidencias seleccionadas, sin necesidad de volver a subir el archivo.
-    ev_ids = [x.strip() for x in evidence_ids.split(",") if x.strip()]
-    if ev_ids:
-        from app.models.evidence import Evidence
-        from app.models.evidence_chunk import EvidenceChunk
-        from app.services.storage_service import storage_service
-        ev_rows = (await db.execute(
-            select(Evidence).where(Evidence.id.in_(ev_ids), Evidence.organization_id == org_id)
-        )).scalars().all()
-        for ev in ev_rows:
-            # 0) Lo más confiable: el texto ya guardado en la BD al subir.
-            texto_ev = (ev.extracted_text or "").strip()
+_jobs_en_curso = set()  # referencias para que asyncio no recolecte las tareas
 
-            # 1) Si no hay, descargar el archivo guardado y extraer el texto ahora.
-            if not texto_ev:
-                try:
-                    data = await storage_service.download(ev.file_url)
-                    fn = (ev.file_name or ev.title or "").lower()
-                    if fn.endswith(".pdf") and PdfReader:
-                        pdf = PdfReader(io.BytesIO(data))
-                        for page in pdf.pages:
-                            t = page.extract_text()
-                            if t:
-                                texto_ev += t + "\n"
-                    else:
-                        try:
-                            texto_ev = data.decode("utf-8")
-                        except Exception:
-                            texto_ev = data.decode("latin-1", errors="ignore")
-                except Exception as e:
-                    print(f"No se pudo descargar la evidencia {ev.id}, uso el índice: {e}")
 
-            # 2) Fallback: texto ya indexado (EvidenceChunk).
-            if not texto_ev.strip():
-                chunks = (await db.execute(
-                    select(EvidenceChunk).where(
-                        EvidenceChunk.evidence_id == ev.id,
-                        EvidenceChunk.organization_id == org_id,
-                    ).order_by(EvidenceChunk.chunk_index)
-                )).scalars().all()
-                texto_ev = "\n".join(c.content for c in chunks if c.content)
+def _texto_de_bytes(data: bytes, filename: str) -> str:
+    filename = (filename or "").lower()
+    texto = ""
+    if filename.endswith(".pdf") and PdfReader:
+        try:
+            pdf = PdfReader(io.BytesIO(data))
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    texto += t + "\n"
+        except Exception as e:
+            print(f"Error leyendo PDF: {e}")
+    else:
+        try:
+            texto = data.decode("utf-8")
+        except Exception:
+            texto = data.decode("latin-1", errors="ignore")
+    return texto
 
-            if texto_ev.strip():
-                contexto += f"\n\n### Documento: {ev.title}\n{texto_ev}"
 
-    for f in (files or []):
-        data = await f.read()
-        texto = ""
-        filename = f.filename.lower() if f.filename else ""
-        
-        # Extracción robusta de PDF
-        if filename.endswith('.pdf') and PdfReader:
+async def _documentos_guardados(db: AsyncSession, ev_ids: List[str], org_id: str):
+    """Texto de las evidencias seleccionadas del Centro de Evidencias."""
+    from app.models.evidence import Evidence
+    from app.models.evidence_chunk import EvidenceChunk
+    from app.services.storage_service import storage_service
+
+    documentos = []
+    ev_rows = (await db.execute(
+        select(Evidence).where(Evidence.id.in_(ev_ids), Evidence.organization_id == org_id)
+    )).scalars().all()
+    for ev in ev_rows:
+        # 0) Lo más confiable: el texto ya guardado en la BD al subir.
+        texto_ev = (ev.extracted_text or "").strip()
+        # 1) Si no hay, descargar el archivo guardado y extraer el texto ahora.
+        if not texto_ev:
             try:
-                import io
-                pdf = PdfReader(io.BytesIO(data))
-                for page in pdf.pages:
-                    extracted = page.extract_text()
-                    if extracted: texto += extracted + "\n"
+                data = await storage_service.download(ev.file_url)
+                texto_ev = _texto_de_bytes(data, ev.file_name or ev.title or "")
             except Exception as e:
-                print(f"Error leyendo PDF: {e}")
+                print(f"No se pudo descargar la evidencia {ev.id}, uso el índice: {e}")
+        # 2) Fallback: texto ya indexado (EvidenceChunk).
+        if not texto_ev.strip():
+            chunks = (await db.execute(
+                select(EvidenceChunk).where(
+                    EvidenceChunk.evidence_id == ev.id,
+                    EvidenceChunk.organization_id == org_id,
+                ).order_by(EvidenceChunk.chunk_index)
+            )).scalars().all()
+            texto_ev = "\n".join(c.content for c in chunks if c.content)
+        if texto_ev.strip():
+            documentos.append((ev.title or "Documento", texto_ev))
+    return documentos
+
+
+async def _guardar_resultados(db: AsyncSession, org_id: str, preguntas, resultados):
+    """Guarda las respuestas y refleja los veredictos en el SOA (ControlStatus)."""
+    q_ids_res = [str(item.get("id")) for item in resultados if item.get("id")]
+    respuestas_existentes = {}
+    if q_ids_res:
+        exist_stmt = select(AssessmentAnswer).where(AssessmentAnswer.organization_id == org_id, AssessmentAnswer.question_id.in_(q_ids_res))
+        respuestas_existentes = {a.question_id: a for a in (await db.execute(exist_stmt)).scalars().all()}
+
+    for item in resultados:
+        qid = str(item.get("id") or "").strip()
+        if not qid:
+            continue
+        veredicto = item.get("veredicto", "sin_evidencia")
+        if veredicto not in {"cumple", "parcial", "no_cumple", "sin_evidencia"}:
+            veredicto = "sin_evidencia"
+        try:
+            confianza = float(item.get("confianza", 0.0))
+        except Exception:
+            confianza = 0.0
+        existing = respuestas_existentes.get(qid)
+        if existing:
+            existing.veredicto = veredicto
+            existing.confianza = confianza
+            existing.justificacion = item.get("justificacion")
         else:
-            try: texto = data.decode('utf-8')
-            except: texto = data.decode('latin-1', errors='ignore')
-            
-        if texto.strip():
-            contexto += f"\n\n### Documento: {f.filename}\n{texto}"
+            db.add(AssessmentAnswer(question_id=qid, organization_id=org_id, veredicto=veredicto, confianza=confianza, justificacion=item.get("justificacion")))
+    await db.commit()
 
-    if not contexto.strip(): raise HTTPException(status_code=400, detail="No se pudo extraer texto. Asegúrate de que los PDFs no sean solo imágenes.")
+    # --- Puente hacia el SOA: actualizar el estado de los controles ISO ---
+    # Mapeo por código: pregunta "A.5.1" -> control "5.1".
+    q_by_id = {q.id: q for q in preguntas}
+    estado_por_veredicto = {
+        "cumple": ("Implementado", 100),
+        "parcial": ("Planificado", 50),
+        "no_cumple": ("No Implementado", 0),
+        "sin_evidencia": ("No Implementado", 0),
+    }
+    statuses = {cs.control_id: cs for cs in (await db.execute(
+        select(ControlStatus).where(ControlStatus.organization_id == org_id)
+    )).scalars().all()}
+    for item in resultados:
+        q = q_by_id.get(str(item.get("id") or "").strip())
+        if not q:
+            continue
+        cs = statuses.get(_codigo_a_control_id(q.codigo))
+        if not cs:
+            continue  # solo tocamos controles que existan para esta empresa
+        veredicto = item.get("veredicto", "sin_evidencia")
+        # No degradamos un control ya Implementado por un "sin_evidencia".
+        if veredicto in ("sin_evidencia", "no_cumple") and cs.status == "Implementado":
+            continue
+        nuevo_estado, score = estado_por_veredicto.get(veredicto, ("No Implementado", 0))
+        cs.applies = True
+        cs.status = nuevo_estado
+        cs.score = score
+        if item.get("justificacion"):
+            cs.justification = item.get("justificacion")
+    await db.commit()
 
-    stmt = select(AssessmentQuestion)
-    ids = [x.strip() for x in question_ids.split(",") if x.strip()]
-    if ids: stmt = stmt.where(AssessmentQuestion.id.in_(ids))
-    preguntas = (await db.execute(stmt.order_by(AssessmentQuestion.orden))).scalars().all()
 
-    resultados = []
-    if preguntas:
-        TAMANO_LOTE = 10
-        lotes = [preguntas[i:i + TAMANO_LOTE] for i in range(0, len(preguntas), TAMANO_LOTE)]
-        sem = asyncio.Semaphore(3)
-
-        async def evaluar_lote(qs):
-            async with sem:
-                prompt = f"""Eres un Auditor ISO 27001 y Ley 21.719. Analiza este documento:
-                {contexto[:8000]}
-                
-                Responde a estas preguntas basadas SOLAMENTE en el documento:
-                {json.dumps([{"id": q.id, "pregunta": q.pregunta, "codigo": q.codigo} for q in qs])}
-                
-                Instrucciones:
-                1. Si el documento muestra explícitamente que cumplen la pregunta, "veredicto" es "cumple".
-                2. Si el documento muestra cumplimiento parcial o falta información clave, "veredicto" es "parcial".
-                3. Si el documento no menciona el tema o no hay evidencia, "veredicto" es "sin_evidencia".
-                4. "justificacion" debe ser una breve razón de tu veredicto citando el documento.
-                
-                MUY IMPORTANTE: Tu respuesta DEBE ser un arreglo JSON válido y NADA MÁS. No incluyas bloques de código markdown (```json), ni texto introductorio, ni comentarios.
-                
-                Ejemplo de formato esperado:
-                [
-                  {{ "id": "id_pregunta_1", "veredicto": "cumple", "confianza": 0.9, "justificacion": "El documento menciona..." }},
-                  {{ "id": "id_pregunta_2", "veredicto": "sin_evidencia", "confianza": 0.1, "justificacion": "No se menciona en el texto proporcionado." }}
-                ]
-                """
-                resp_text = await ai_service.generate_document(prompt)
-                
-                parsed_json = extract_json_from_text(resp_text)
-                if parsed_json:
-                    return parsed_json
-                else:
-                    return [{"id": q.id, "veredicto": "sin_evidencia", "confianza": 0.0, "justificacion": "Error: La IA no devolvió un JSON válido."} for q in qs]
-
-        lotes_res = await asyncio.gather(*[evaluar_lote(qs) for qs in lotes])
-        resultados = [item for sub in lotes_res for item in sub if type(item) is dict]
-
-        q_ids_res = [str(item.get("id")) for item in resultados if item.get("id")]
-        respuestas_existentes = {}
-        if q_ids_res:
-            exist_stmt = select(AssessmentAnswer).where(AssessmentAnswer.organization_id == org_id, AssessmentAnswer.question_id.in_(q_ids_res))
-            respuestas_existentes = {a.question_id: a for a in (await db.execute(exist_stmt)).scalars().all()}
-
-        for item in resultados:
-            qid = str(item.get("id") or "").strip()
-            if not qid: continue
-            veredicto = item.get("veredicto", "sin_evidencia")
-            if veredicto not in {"cumple", "parcial", "no_cumple", "sin_evidencia"}: veredicto = "sin_evidencia"
-            try: confianza = float(item.get("confianza", 0.0))
-            except: confianza = 0.0
-            
-            existing = respuestas_existentes.get(qid)
-            if existing:
-                existing.veredicto = veredicto
-                existing.confianza = confianza
-                existing.justificacion = item.get("justificacion")
-            else:
-                db.add(AssessmentAnswer(question_id=qid, organization_id=org_id, veredicto=veredicto, confianza=confianza, justificacion=item.get("justificacion")))
-        await db.commit()
-
-        # --- Puente hacia el SOA: actualizar el estado de los controles ISO ---
-        # El veredicto de la IA se refleja en ControlStatus para que el SOA y
-        # Resultados cambien. Mapeo por código: pregunta "A.5.1" -> control "5.1".
-        q_by_id = {q.id: q for q in preguntas}
-        estado_por_veredicto = {
-            "cumple": ("Implementado", 100),
-            "parcial": ("Planificado", 50),
-            "no_cumple": ("No Implementado", 0),
-            "sin_evidencia": ("No Implementado", 0),
-        }
-        for item in resultados:
-            qid = str(item.get("id") or "").strip()
-            q = q_by_id.get(qid)
-            if not q:
-                continue
-            control_id = _codigo_a_control_id(q.codigo)
-            veredicto = item.get("veredicto", "sin_evidencia")
-            nuevo_estado, score = estado_por_veredicto.get(veredicto, ("No Implementado", 0))
-            # Solo tocamos controles que existan para esta empresa.
-            cs_res = await db.execute(
-                select(ControlStatus).where(
-                    ControlStatus.control_id == control_id,
-                    ControlStatus.organization_id == org_id,
-                )
-            )
-            cs = cs_res.scalar_one_or_none()
-            if not cs:
-                continue
-            # No degradamos un control ya Implementado por un "sin_evidencia".
-            if veredicto in ("sin_evidencia", "no_cumple") and cs.status == "Implementado":
-                continue
-            cs.applies = True
-            cs.status = nuevo_estado
-            cs.score = score
-            if item.get("justificacion"):
-                cs.justification = item.get("justificacion")
-        await db.commit()
-
-    # EXTRAER TRATAMIENTOS RoPA AUTOMÁTICAMENTE
-    extracted_treatments = []
-    try:
-        ropa_prompt = f"""Analiza detalladamente este documento y extrae TODAS las Actividades de Tratamiento de Datos Personales (para un Registro RoPA).
-        Documento: 
+async def _extraer_ropa(contexto: str):
+    ropa_prompt = f"""Analiza detalladamente este documento y extrae TODAS las Actividades de Tratamiento de Datos Personales (para un Registro RoPA).
+        Documento:
         {contexto[:8000]}
-        
+
         Busca información como: gestión de clientes, marketing, recursos humanos, videovigilancia, etc.
         Para cada tratamiento encontrado, extrae la siguiente información:
         - "nombre": Nombre descriptivo de la actividad (ej. "Gestión de clientes y facturación").
@@ -680,12 +620,12 @@ async def evaluate_with_ai(
         - "categorias_datos": Qué datos se recopilan (ej. "nombre, RUT, dirección").
         - "plazo_conservacion": Cuánto tiempo se guardan.
         - "destinatarios": A quién se comparten los datos (opcional, si se menciona).
-        
+
         Instrucciones MUY IMPORTANTES:
         1. Devuelve ÚNICAMENTE un arreglo JSON válido y NADA MÁS.
         2. No incluyas bloques de código markdown (```json), ni explicaciones.
         3. Si no encuentras NINGÚN tratamiento, devuelve un arreglo vacío: []
-        
+
         Ejemplo de formato esperado:
         [
           {{
@@ -698,13 +638,90 @@ async def evaluate_with_ai(
           }}
         ]
         """
-        
-        ropa_text = await ai_service.generate_document(ropa_prompt)
-        
-        extracted_treatments = extract_json_from_text(ropa_text)
-        print(f"Tratamientos extraídos: {len(extracted_treatments)}")
-
+    try:
+        ropa_text = await qe._llamar_con_reintentos(ai_service, ropa_prompt)
+        tratamientos = extract_json_from_text(ropa_text)
+        print(f"Tratamientos extraídos: {len(tratamientos)}")
+        return tratamientos
     except Exception as e:
         print(f"Error en la extracción de RoPA: {e}")
+        return []
 
-    return { "total": len(resultados), "results": resultados, "extracted_treatments": extracted_treatments }
+
+async def _ejecutar_job(job_id: str, org_id: str, preguntas, documentos):
+    job = qe.JOBS[job_id]
+
+    def progreso(avance: int, etapa):
+        job["done"] = min(job["total"], job["done"] + avance)
+        if etapa:
+            job["stage"] = etapa
+
+    try:
+        from app.routes.evidence import embedding_service
+        job["stage"] = "Buscando qué preguntas se relacionan con los documentos"
+        resultados, enviadas = await qe.evaluar_preguntas(
+            ai_service, embedding_service, preguntas, documentos, extract_json_from_text, progreso
+        )
+        job["stage"] = "Guardando resultados y actualizando la SOA"
+        async with AsyncSessionLocal() as db:
+            await _guardar_resultados(db, org_id, preguntas, resultados)
+
+        job["stage"] = "Extrayendo tratamientos (RoPA)"
+        contexto = "\n\n".join(f"### Documento: {t}\n{x}" for t, x in documentos)
+        tratamientos = await _extraer_ropa(contexto)
+
+        job["result"] = {
+            "total": len(resultados), "results": resultados,
+            "extracted_treatments": tratamientos, "evaluated_with_ai": enviadas,
+        }
+        job["done"] = job["total"]
+        job["status"] = "done"
+        job["stage"] = "Listo"
+    except Exception as e:
+        print(f"Error en el job de evaluación {job_id}: {e}")
+        job["status"] = "error"
+        job["error"] = "La evaluación falló en el servidor. Intenta de nuevo."
+
+
+@router.post("/evaluate")
+async def evaluate_with_ai(
+    files: List[UploadFile] = File(default=None),
+    question_ids: str = Form(""),
+    evidence_ids: str = Form(""),  # documentos ya guardados en el Centro de Evidencias
+    current_user: dict = Depends(RequireRole(ELEVATED_WRITE)),
+    org_id: str = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db)
+):
+    documentos = []
+    ev_ids = [x.strip() for x in evidence_ids.split(",") if x.strip()]
+    if ev_ids:
+        documentos += await _documentos_guardados(db, ev_ids, org_id)
+    for f in (files or []):
+        texto = _texto_de_bytes(await f.read(), f.filename)
+        if texto.strip():
+            documentos.append((f.filename or "Documento", texto))
+
+    if not documentos:
+        raise HTTPException(status_code=400, detail="No se pudo extraer texto. Asegúrate de que los PDFs no sean solo imágenes.")
+
+    stmt = select(AssessmentQuestion)
+    ids = [x.strip() for x in question_ids.split(",") if x.strip()]
+    if ids:
+        stmt = stmt.where(AssessmentQuestion.id.in_(ids))
+    preguntas = (await db.execute(stmt.order_by(AssessmentQuestion.orden))).scalars().all()
+    if not preguntas:
+        raise HTTPException(status_code=400, detail="No hay preguntas para evaluar.")
+
+    job_id = qe.crear_job(org_id, len(preguntas))
+    tarea = asyncio.create_task(_ejecutar_job(job_id, org_id, list(preguntas), documentos))
+    _jobs_en_curso.add(tarea)
+    tarea.add_done_callback(_jobs_en_curso.discard)
+    return {"job_id": job_id, "total": len(preguntas)}
+
+
+@router.get("/evaluate/{job_id}")
+async def evaluate_status(job_id: str, org_id: str = Depends(get_current_org)):
+    job = qe.obtener_job(job_id, org_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="La evaluación no existe o expiró (el servidor pudo haberse reiniciado).")
+    return job

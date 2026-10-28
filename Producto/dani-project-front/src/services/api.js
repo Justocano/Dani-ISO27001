@@ -1146,37 +1146,47 @@ export const assessmentQuestionsAPI = {
 
   // Evaluar con IA: sube documentos y la IA responde cada pregunta.
   // questionIds = [] -> evalúa todas; con ids -> solo esas (revalidar).
-  evaluate: async (files, questionIds = [], evidenceIds = [], token = null) => {
+  // La evaluación corre en segundo plano en el servidor: este método la inicia
+  // y consulta el avance cada 2 s, llamando a onProgress({ done, total, stage }).
+  // Devuelve el mismo resultado de siempre: { total, results, extracted_treatments }.
+  evaluate: async (files, questionIds = [], evidenceIds = [], token = null, onProgress = null) => {
     const activeToken = token || localStorage.getItem('token');
+    const headers = { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) };
     const form = new FormData();
     (files || []).forEach((f) => form.append('files', f));
     form.append('question_ids', (questionIds || []).join(','));
     form.append('evidence_ids', (evidenceIds || []).join(','));
-    // Timeout de seguridad: la evaluación con IA puede tardar, pero no debe
-    // colgarse indefinidamente. Cortamos a los 5 minutos.
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000);
-    try {
-      const response = await fetch(`${API_URL}/api/assessment-questions/evaluate`, {
-        method: 'POST',
-        headers: { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) },
-        body: form,
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        let detail = `Error ${response.status}`;
-        try { const e = await response.json(); if (e.detail) detail = e.detail; } catch (_) {}
-        throw new Error(detail);
+
+    const leerError = async (response) => {
+      let detail = `Error ${response.status}`;
+      try { const e = await response.json(); if (e.detail) detail = e.detail; } catch (_) {}
+      return new Error(detail);
+    };
+
+    const start = await fetch(`${API_URL}/api/assessment-questions/evaluate`, { method: 'POST', headers, body: form });
+    if (!start.ok) throw await leerError(start);
+    const { job_id, total } = await start.json();
+    if (onProgress) onProgress({ done: 0, total, stage: 'Iniciando evaluación' });
+
+    // Hasta ~60 min de espera; los fallos de red puntuales no cortan el sondeo.
+    let fallosSeguidos = 0;
+    for (let i = 0; i < 1800; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let job;
+      try {
+        const res = await fetch(`${API_URL}/api/assessment-questions/evaluate/${job_id}`, { headers });
+        if (!res.ok) throw await leerError(res);
+        job = await res.json();
+        fallosSeguidos = 0;
+      } catch (err) {
+        if (++fallosSeguidos >= 10) throw err;
+        continue;
       }
-      return response.json();
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        throw new Error('La evaluación con IA tardó demasiado (timeout). Intenta con menos preguntas o vuelve a intentar.');
-      }
-      throw err;
-    } finally {
-      clearTimeout(timeoutId);
+      if (onProgress) onProgress({ done: job.done, total: job.total, stage: job.stage });
+      if (job.status === 'done') return job.result;
+      if (job.status === 'error') throw new Error(job.error || 'La evaluación falló.');
     }
+    throw new Error('La evaluación con IA tardó demasiado. Vuelve a intentarlo.');
   },
 };
 

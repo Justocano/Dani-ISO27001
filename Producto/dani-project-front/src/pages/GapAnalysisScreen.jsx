@@ -66,6 +66,7 @@ function GapAnalysisScreen({ onNavigate }) {
   const [selectedEvidenceIds, setSelectedEvidenceIds] = useState([]);
   const [uploadingDocs, setUploadingDocs] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [evalProgress, setEvalProgress] = useState(null); // { done, total, stage } del job en el servidor
   const [evalError, setEvalError] = useState(null);
   const [evalInfo, setEvalInfo] = useState(null);
   const [aiResults, setAiResults] = useState(() => { try { return JSON.parse(localStorage.getItem('dani_gap_ai_results') || '{}'); } catch { return {}; } });
@@ -323,9 +324,9 @@ function GapAnalysisScreen({ onNavigate }) {
       if (ids.length === 0) { setEvalInfo('No hay preguntas pendientes.'); return; }
     }
 
-    setIsEvaluating(true);
+    setIsEvaluating(true); setEvalProgress(null);
     try {
-      const resp = await assessmentQuestionsAPI.evaluate([], ids, selectedEvidenceIds);
+      const resp = await assessmentQuestionsAPI.evaluate([], ids, selectedEvidenceIds, null, setEvalProgress);
       
       // 1. Mapeo de respuestas a la vista de preguntas
       const newAnswers = { ...answers };
@@ -393,7 +394,11 @@ function GapAnalysisScreen({ onNavigate }) {
       }
 
       // 5. Informe final visual
-      let finalMsg = `✅ IA evaluó ${resp.total} preguntas y actualizó los controles de la SOA.\n\n`;
+      let finalMsg = `✅ Se revisaron ${resp.total} preguntas y se actualizaron los controles de la SOA.\n`;
+      if (typeof resp.evaluated_with_ai === 'number' && resp.evaluated_with_ai < resp.total) {
+        finalMsg += `La IA analizó en detalle ${resp.evaluated_with_ai} preguntas relacionadas con tus documentos; las otras ${resp.total - resp.evaluated_with_ai} quedaron como "sin evidencia".\n`;
+      }
+      finalMsg += '\n';
       if (tratamientosAgregados > 0) finalMsg += `🎯 Extrajo ${tratamientosAgregados} tratamientos nuevos y los inyectó en tu registro RoPA!\n`;
       
       alert(finalMsg);
@@ -403,6 +408,7 @@ function GapAnalysisScreen({ onNavigate }) {
       setEvalError(e.message || 'Error al evaluar con IA.');
     } finally {
       setIsEvaluating(false);
+      setEvalProgress(null);
     }
   };
 
@@ -978,7 +984,18 @@ function GapAnalysisScreen({ onNavigate }) {
                     <button type="button" onClick={() => handleEvaluateWithAI(false)} disabled={isEvaluating || selectedEvidenceIds.length === 0} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '7px', width: '100%', padding: '11px', borderRadius: '9px', border: 'none', background: '#004ac6', color: '#fff', fontWeight: 700, fontSize: '12px', cursor: 'pointer', opacity: isEvaluating || !selectedEvidenceIds.length ? .55 : 1 }}><Wand2 size={15} />{isEvaluating ? 'Evaluando...' : 'Evaluar con IA'}</button>
                     <button type="button" onClick={() => handleEvaluateWithAI(true)} disabled={isEvaluating || selectedEvidenceIds.length === 0} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '7px', width: '100%', padding: '10px', borderRadius: '9px', border: `1px solid ${t.border}`, background: t.cardBg, color: t.text, fontWeight: 600, fontSize: '12px', cursor: 'pointer', opacity: isEvaluating || !selectedEvidenceIds.length ? .55 : 1 }}><Activity size={15} />Revalidar pendientes</button>
                   </div>
-                  {isEvaluating && <p style={{ margin: '12px 0 0', fontSize: '12px', color: '#004ac6' }}>La IA está analizando los documentos...</p>}
+                  {isEvaluating && (
+                    <div style={{ marginTop: '12px' }}>
+                      <p style={{ margin: 0, fontSize: '12px', color: '#004ac6' }}>
+                        {evalProgress ? `${evalProgress.stage || 'Evaluando'} · ${evalProgress.done} de ${evalProgress.total} preguntas` : 'La IA está analizando los documentos...'}
+                      </p>
+                      {evalProgress && evalProgress.total > 0 && (
+                        <div role="progressbar" aria-valuenow={evalProgress.done} aria-valuemin={0} aria-valuemax={evalProgress.total} style={{ marginTop: '6px', height: '6px', background: t.inputBg, borderRadius: '10px', overflow: 'hidden' }}>
+                          <div style={{ width: `${Math.round((evalProgress.done / evalProgress.total) * 100)}%`, height: '100%', background: '#004ac6', transition: 'width .3s' }} />
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {evalError && <div role="alert" style={{ marginTop: '12px', padding: '10px', borderRadius: '8px', background: 'rgba(239,68,68,.08)', color: '#dc2626', fontSize: '12px', overflowWrap: 'anywhere' }}>{evalError}</div>}
                   {evalInfo && <div style={{ marginTop: '12px', padding: '10px', borderRadius: '8px', background: t.inputBg, color: t.text, fontSize: '12px', whiteSpace: 'pre-line' }}>{evalInfo}</div>}
                 </aside>
