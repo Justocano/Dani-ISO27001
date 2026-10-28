@@ -658,6 +658,12 @@ async def _ejecutar_job(job_id: str, org_id: str, preguntas, documentos):
 
     try:
         from app.routes.evidence import embedding_service
+        # La extracción RoPA es una sola llamada larga (la IA debe escribir un
+        # JSON con todos los tratamientos). La lanzamos AL INICIO, en paralelo
+        # con las preguntas, para que su tiempo no se sume al final.
+        contexto = "\n\n".join(f"### Documento: {t}\n{x}" for t, x in documentos)
+        tarea_ropa = asyncio.create_task(_extraer_ropa(contexto))
+
         job["stage"] = "Buscando qué preguntas se relacionan con los documentos"
         resultados, enviadas = await qe.evaluar_preguntas(
             ai_service, embedding_service, preguntas, documentos, extract_json_from_text, progreso
@@ -666,9 +672,9 @@ async def _ejecutar_job(job_id: str, org_id: str, preguntas, documentos):
         async with AsyncSessionLocal() as db:
             await _guardar_resultados(db, org_id, preguntas, resultados)
 
-        job["stage"] = "Extrayendo tratamientos (RoPA)"
-        contexto = "\n\n".join(f"### Documento: {t}\n{x}" for t, x in documentos)
-        tratamientos = await _extraer_ropa(contexto)
+        if not tarea_ropa.done():
+            job["stage"] = "Terminando de extraer tratamientos (RoPA)"
+        tratamientos = await tarea_ropa
 
         job["result"] = {
             "total": len(resultados), "results": resultados,
