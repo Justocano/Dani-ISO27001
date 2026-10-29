@@ -37,13 +37,6 @@ const DataRequestsScreen = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [newRequest, setNewRequest] = useState({ titular: '', tipo: 'acceso', descripcion: '' });
 
-  // Datos demo: se usan solo si el backend no responde, para no dejar la pantalla vacía.
-  const demoRequests = [
-    { id: 'demo-1', titular: 'Juan Pérez', tipo: 'acceso', descripcion: 'Solicita copia de todos sus datos personales.', fecha_solicitud: new Date().toISOString(), fecha_limite: addBusinessDays(new Date(), 28).toISOString(), estado: 'pendiente', responsable: null, respuesta: null },
-    { id: 'demo-2', titular: 'María González', tipo: 'cancelacion', descripcion: 'Pide eliminar su cuenta y sus datos asociados.', fecha_solicitud: new Date().toISOString(), fecha_limite: addBusinessDays(new Date(), 2).toISOString(), estado: 'en_proceso', responsable: 'dpo@empresa.cl', respuesta: null },
-    { id: 'demo-3', titular: 'Pedro Soto', tipo: 'rectificacion', descripcion: 'Corregir dirección registrada.', fecha_solicitud: new Date().toISOString(), fecha_limite: addBusinessDays(new Date(), -1).toISOString(), estado: 'pendiente', responsable: null, respuesta: null },
-  ];
-
   useEffect(() => { fetchRequests(); }, []);
 
   const fetchRequests = async () => {
@@ -51,11 +44,11 @@ const DataRequestsScreen = () => {
     setError(null);
     try {
       const data = await dataRequestsAPI.getAll();
-      setRequests(Array.isArray(data) && data.length > 0 ? data : demoRequests);
+      setRequests(Array.isArray(data) ? data : []);
     } catch (err) {
-      console.error('Error al cargar solicitudes ARCO+P. Usando datos demo.', err);
-      setError('No se pudo conectar con el servidor. Mostrando datos de ejemplo.');
-      setRequests(demoRequests);
+      console.error('Error al cargar solicitudes ARCO+P.', err);
+      setError('No se pudieron cargar las solicitudes. Revisa tu conexión y recarga la página.');
+      setRequests([]);
     } finally {
       setLoading(false);
     }
@@ -283,20 +276,6 @@ function parseServerDate(s) {
   return new Date(tieneZona ? s : s + 'Z');
 }
 
-// ==========================================
-// Helper: suma días hábiles (solo para datos demo del frontend)
-// ==========================================
-function addBusinessDays(date, days) {
-  const result = new Date(date);
-  const step = days >= 0 ? 1 : -1;
-  let remaining = Math.abs(days);
-  while (remaining > 0) {
-    result.setDate(result.getDate() + step);
-    const dow = result.getDay();
-    if (dow !== 0 && dow !== 6) remaining--;
-  }
-  return result;
-}
 
 // ==========================================
 // Subcomponentes y estilos

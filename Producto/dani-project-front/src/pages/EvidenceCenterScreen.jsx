@@ -162,11 +162,6 @@ function EvidenceCenterScreen() {
   const handleViewEvidence = async (evidence, e) => {
     e.stopPropagation();
     try {
-      // Si el id es muy corto (ej: 1, 2, 3), es un mock hardcodeado
-      if (evidence.id.toString().length < 5) {
-        alert("Esta evidencia es un ejemplo de diseño. Para probar el visualizador, sube tu propia evidencia real usando la pestaña Carga Masiva.");
-        return;
-      }
       const { evidenceAPI } = await import('../services/api');
       const fileUrl = await evidenceAPI.download(evidence.id);
       window.open(fileUrl, '_blank');

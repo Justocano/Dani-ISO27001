@@ -111,10 +111,3 @@ async def delete_treatment(treatment_id: str, org_id: str = Depends(get_current_
     await db.delete(treatment)
     await db.commit()
     return {"message": "Tratamiento eliminado exitosamente"}
-
-@router.delete("/{treatment_id}")
-async def delete_treatment(treatment_id: str, org_id: str = Depends(get_current_org), db: AsyncSession = Depends(get_db)):
-    treatment = await get_scoped_or_404(db, DataTreatment, treatment_id, org_id, detail="Tratamiento no encontrado")
-    await db.delete(treatment)
-    await db.commit()
-    return {"message": "Tratamiento eliminado exitosamente"}

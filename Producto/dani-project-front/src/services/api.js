@@ -227,7 +227,9 @@ export const documentsAPI = {
         ...(resolvedToken && { 'Authorization': `Bearer ${resolvedToken}` })
       }
     });
-    return response.json();
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || 'No se pudo registrar la aceptación');
+    return data;
   }
 };
 
