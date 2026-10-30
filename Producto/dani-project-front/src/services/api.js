@@ -291,34 +291,6 @@ export const capaAPI = {
   }
 };
 
-export const dataRequestsAPI = {
-  getAll: async (token = null) => {
-    const activeToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/data-requests`, { headers: { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) } });
-    if (!response.ok) throw new Error(`Error ${response.status}`);
-    const data = await response.json();
-    return Array.isArray(data) ? data : [];
-  },
-  getOne: async (requestId, token = null) => {
-    const activeToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/data-requests/${requestId}`, { headers: { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) } });
-    if (!response.ok) throw new Error(`Error ${response.status}`);
-    return response.json();
-  },
-  create: async (requestData, token = null) => {
-    const activeToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/data-requests`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) }, body: JSON.stringify(requestData) });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
-  },
-  update: async (requestId, updateData, token = null) => {
-    const activeToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/data-requests/${requestId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) }, body: JSON.stringify(updateData) });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
-  }
-};
-
 export const breachesAPI = {
   getAll: async (token = null) => {
     const activeToken = token || localStorage.getItem('token');
@@ -359,129 +331,6 @@ export const authFetch = async (endpoint, options = {}) => {
   return await fetch(`${API_URL}${endpoint}`, { ...defaultOptions, ...options, headers: { ...defaultOptions.headers, ...options.headers } });
 };
 
-export const treatmentsAPI = {
-  getAll: async (token) => {
-    const activeToken = token || localStorage.getItem('token');
-    try {
-      const response = await fetch(`${API_URL}/api/treatments`, { headers: { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) } });
-      if (!response.ok) throw new Error('Error al obtener tratamientos');
-      return await response.json();
-    } catch (e) {
-      console.warn("Usando datos de fallback para tratamientos");
-      return null; 
-    }
-  },
-  create: async (treatmentData, token = null) => {
-    const activeToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/treatments/`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) }, body: JSON.stringify(treatmentData) });
-    if (!response.ok) {
-      let detail = `Error ${response.status}`;
-      try { const e = await response.json(); if (e.detail) detail = e.detail; } catch (_) {}
-      throw new Error(detail);
-    }
-    return response.json();
-  },
-  delete: async (treatmentId, token = null) => {
-    const activeToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/treatments/${treatmentId}`, { method: 'DELETE', headers: { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) } });
-    if (!response.ok) throw new Error(`Error ${response.status}`);
-    return response.json();
-  }
-};
-
-export const impactAPI = {
-  getAll: async (token = null) => {
-    const activeToken = token || localStorage.getItem('token');
-    try {
-      const response = await fetch(`${API_URL}/api/impact`, { headers: { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) } });
-      if (!response.ok) throw new Error('Error al obtener evaluaciones');
-      return await response.json();
-    } catch (e) { return null; }
-  },
-  analyzeAll: async (token = null) => {
-    const activeToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/impact/analyze-all`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) } });
-    if (!response.ok) throw new Error(`Error ${response.status}`);
-    return response.json();
-  }
-};
-
-export const consentsAPI = {
-  getAll: async (token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/consents`, { headers: { ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) } });
-    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || 'Error al obtener'); }
-    return response.json();
-  },
-  getById: async (id, token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/consents/${id}`, { headers: { ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) } });
-    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || 'Error al obtener'); }
-    return response.json();
-  },
-  create: async (consentData, token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/consents`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) },
-      body: JSON.stringify(consentData)
-    });
-    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || 'Error al registrar'); }
-    return response.json();
-  },
-  revoke: async (id, token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/consents/${id}/revoke`, {
-      method: 'POST',
-      headers: { ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) }
-    });
-    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || 'Error al revocar'); }
-    return response.json();
-  },
-  delete: async (id, token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/consents/${id}`, {
-      method: 'DELETE',
-      headers: { ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) }
-    });
-    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || 'Error al eliminar'); }
-    return response.json();
-  }
-};
-
-export const vendorsAPI = {
-  getAll: async (token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/vendors/`, { headers: { ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) } });
-    if (!response.ok) throw new Error('Error al obtener');
-    return response.json();
-  },
-  getById: async (vendorId, token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/vendors/${vendorId}`, { headers: { ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) } });
-    if (!response.ok) throw new Error('Error al obtener');
-    return response.json();
-  },
-  create: async (vendorData, token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/vendors/`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) }, body: JSON.stringify(vendorData) });
-    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || 'Error al crear'); }
-    return response.json();
-  },
-  update: async (vendorId, vendorData, token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/vendors/${vendorId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) }, body: JSON.stringify(vendorData) });
-    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || 'Error al actualizar'); }
-    return response.json();
-  },
-  delete: async (vendorId, token = null) => {
-    const resolvedToken = token || localStorage.getItem('token');
-    const response = await fetch(`${API_URL}/api/vendors/${vendorId}`, { method: 'DELETE', headers: { ...(resolvedToken && { Authorization: `Bearer ${resolvedToken}` }) } });
-    if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || 'Error al eliminar'); }
-    return response.json();
-  }
-};
-
 export const endpoints = {
   login: `${API_URL}/api/auth/login`,
   register: `${API_URL}/api/auth/register`,
@@ -495,7 +344,6 @@ export const endpoints = {
   risks: `${API_URL}/api/risks`,
   chat: `${API_URL}/api/chat`,
   users: `${API_URL}/api/users`,
-  dataRequests: `${API_URL}/api/data-requests`,
   breaches: `${API_URL}/api/breaches`,
 };
 
@@ -562,11 +410,13 @@ export const assessmentQuestionsAPI = {
     return response.json();
   },
 
-  // Carga masiva desde Excel (.xlsx). Devuelve { creadas, omitidas, columnas_detectadas, ... }
-  bulkImport: async (file, token = null) => {
+  // Carga masiva desde Excel (.xlsx) a un marco ('iso27001' o 'ley21719').
+  // Devuelve { marco, creadas, omitidas, columnas_detectadas, ... }
+  bulkImport: async (file, marco, token = null) => {
     const activeToken = token || localStorage.getItem('token');
     const form = new FormData();
     form.append('file', file);
+    form.append('marco', marco);
     const response = await fetch(`${API_URL}/api/assessment-questions/bulk-import`, {
       method: 'POST',
       headers: { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) },
@@ -580,11 +430,13 @@ export const assessmentQuestionsAPI = {
     return response.json();
   },
 
-  // Carga masiva desde un PDF (checklist/listado). Devuelve { creadas, omitidas, total_detectadas, categorias }
-  bulkImportPdf: async (file, token = null) => {
+  // Carga masiva desde un PDF (checklist/listado) a un marco ('iso27001' o 'ley21719').
+  // Devuelve { marco, creadas, omitidas, total_detectadas, categorias }
+  bulkImportPdf: async (file, marco, token = null) => {
     const activeToken = token || localStorage.getItem('token');
     const form = new FormData();
     form.append('file', file);
+    form.append('marco', marco);
     const response = await fetch(`${API_URL}/api/assessment-questions/bulk-import-pdf`, {
       method: 'POST',
       headers: { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) },
@@ -616,16 +468,17 @@ export const assessmentQuestionsAPI = {
     URL.revokeObjectURL(url);
   },
 
-  // Evaluar con IA: sube documentos y la IA responde cada pregunta.
+  // Evaluar con IA: la IA responde las preguntas de UN marco ('iso27001' o 'ley21719').
   // questionIds = [] -> evalúa todas; con ids -> solo esas (revalidar).
   // La evaluación corre en segundo plano en el servidor: este método la inicia
   // y consulta el avance cada 2 s, llamando a onProgress({ done, total, stage }).
-  // Devuelve el mismo resultado de siempre: { total, results, extracted_treatments }.
-  evaluate: async (files, questionIds = [], evidenceIds = [], token = null, onProgress = null) => {
+  // Devuelve { marco, total, results, evaluated_with_ai }.
+  evaluate: async (marco, files, questionIds = [], evidenceIds = [], token = null, onProgress = null) => {
     const activeToken = token || localStorage.getItem('token');
     const headers = { ...(activeToken && { 'Authorization': `Bearer ${activeToken}` }) };
     const form = new FormData();
     (files || []).forEach((f) => form.append('files', f));
+    form.append('marco', marco);
     form.append('question_ids', (questionIds || []).join(','));
     form.append('evidence_ids', (evidenceIds || []).join(','));
 
@@ -663,8 +516,8 @@ export const assessmentQuestionsAPI = {
 };
 
 const api = {
-  API_URL, userAPI, chatAPI, documentsAPI, complianceAPI, authAPI, evidenceAPI, riskAPI, capaAPI, vendorsAPI,
-  consentsAPI, dataRequestsAPI, breachesAPI, authFetch, endpoints, treatmentsAPI, impactAPI, organizationsAPI,
+  API_URL, userAPI, chatAPI, documentsAPI, complianceAPI, authAPI, evidenceAPI, riskAPI, capaAPI,
+  breachesAPI, authFetch, endpoints, organizationsAPI,
   assessmentQuestionsAPI, getFullGapAnalysis, getRemediationPlan, getKPIDashboard, getComplianceScore, getDomainScores
 };
 

@@ -178,9 +178,18 @@ def _contexto_lote(lote, fragmentos, frags_por_preg) -> str:
 
 # ---- Llamadas a la IA ------------------------------------------------------
 
+ROL_POR_MARCO = {
+    "iso27001": "un Auditor Líder ISO/IEC 27001:2022",
+    "ley21719": "un auditor experto en la Ley 21.719 de Protección de Datos Personales de Chile",
+}
+
+
 def _prompt_lote(contexto: str, lote) -> str:
     preguntas_json = json.dumps([{"id": q.id, "pregunta": q.pregunta, "codigo": q.codigo} for q in lote], ensure_ascii=False)
-    return f"""Eres un Auditor ISO 27001 y Ley 21.719. Estos son los fragmentos relevantes de los documentos de la empresa:
+    # Todas las preguntas de una evaluación son del mismo marco normativo.
+    marco = getattr(lote[0], "marco", "iso27001") if lote else "iso27001"
+    rol = ROL_POR_MARCO.get(marco, ROL_POR_MARCO["iso27001"])
+    return f"""Eres {rol}. Evalúa SOLO contra ese marco. Estos son los fragmentos relevantes de los documentos de la empresa:
 {contexto}
 
 Responde a estas preguntas basadas SOLAMENTE en los fragmentos:

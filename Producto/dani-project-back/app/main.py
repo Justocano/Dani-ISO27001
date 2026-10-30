@@ -10,7 +10,7 @@ from app.config import settings
 from app.dependencies.database import engine, Base, AsyncSessionLocal
 
 # --- Routers ---
-from app.routes import auth, risk, evidence, documents, users, treatments
+from app.routes import auth, risk, evidence, documents, users
 from app.routes import chat
 from app.routes import gap_analysis
 from app.routes import ai_routes
@@ -18,11 +18,7 @@ from app.routes import compliance
 from app.routes import capa
 from app.routes import notifications
 from app.routes import report
-from app.routes import impact
-from app.routes import consents
-from app.routes import data_requests
 from app.routes import breaches
-from app.routes import vendors
 from app.routes import assessment_questions
 from app.routes import integrations # NUEVO ROUTER DE INTEGRACIONES
 
@@ -114,6 +110,24 @@ async def lifespan(app: FastAPI):
             "responsable VARCHAR(255)",
         ):
             await conn.execute(text(f"ALTER TABLE data_treatments ADD COLUMN IF NOT EXISTS {_col};"))
+
+        # Preguntas separadas por marco normativo (ISO 27001 / Ley 21.719).
+        # La primera vez que se crea la columna, las preguntas existentes se
+        # clasifican por su categoría. Solo
+        # se hace una vez para no pisar luego lo que el usuario elija a mano.
+        _tiene_marco = (await conn.execute(text(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = 'assessment_questions' AND column_name = 'marco'"
+        ))).first()
+        if not _tiene_marco:
+            await conn.execute(text("ALTER TABLE assessment_questions ADD COLUMN marco VARCHAR(20) NOT NULL DEFAULT 'iso27001';"))
+            # Las categorías ISO son un conjunto cerrado (cláusulas y los 4 dominios
+            # del Anexo A); todo lo demás venía de checklists de protección de datos.
+            await conn.execute(text(
+                "UPDATE assessment_questions SET marco = 'ley21719' WHERE NOT ("
+                "lower(trim(categoria)) ~ '^(cl.usula|organizacional|personas?$|f.sico|tecnol.gico)'"
+                ") OR codigo ILIKE 'L21719%';"
+            ))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_assessment_questions_marco ON assessment_questions (marco);"))
 
     logger.info("✅ Database tables created/verified")
 
@@ -215,15 +229,11 @@ app.include_router(ai_routes.router)
 app.include_router(integrations.router, dependencies=[Depends(RequireRole(ELEVATED_WRITE))])
 
 # --- Routers Ley N° 21.719 ---
+# Tratamientos, consentimientos, solicitudes de titulares, proveedores y la
+# evaluación de impacto por tratamiento se retiraron (feedback del docente).
+# Sus tablas siguen en la BD para no perder datos.
 _ley = [Depends(RequireRole(LEY_ROLES))]
-app.include_router(treatments.router, dependencies=_ley)
-app.include_router(consents.router, dependencies=_ley)
-app.include_router(consents.public_router) 
-app.include_router(data_requests.router, dependencies=_ley)
-app.include_router(data_requests.public_router) 
 app.include_router(breaches.router, dependencies=_ley)
-app.include_router(vendors.router, dependencies=_ley)
-app.include_router(impact.router, dependencies=_ley)
 
 app.include_router(assessment_questions.router, dependencies=[Depends(RequireRole(ELEVATED_NO_DPO))])
 app.include_router(organizations.router)  

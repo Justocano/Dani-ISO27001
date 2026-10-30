@@ -23,6 +23,9 @@ function GapAnalysisScreen({ onNavigate }) {
   }[language] || { gapAnalysis: 'Análisis de Brechas', completeAssessment: 'Completa la evaluación para generar tu Declaración de Aplicabilidad (SOA)', question: 'Pregunta', previous: 'Anterior', continue: 'Continuar', yes: 'Sí', no: 'No', partially: 'Parcialmente', soaTitle: 'Declaración de Aplicabilidad (SOA)', soaApplicable: 'Aplica', soaImplemented: 'Implementado', showAll: 'Todos', showApplicable: 'Aplica', showNotApplicable: 'No Aplica', control: 'Control', description: 'Descripción', applicable: 'Aplica', status: 'Estado', justification: 'Justificación', implemented: 'Implementado', planned: 'Planificado', notImplemented: 'No Implementado', required: 'Requerido', autoSaved: 'Auto-guardado' };
 
   const [activeMainTab, setActiveMainTab] = useState('assessment');
+  // Marco normativo con el que se trabaja: la evaluación usa uno a la vez.
+  const [marco, setMarco] = useState(() => { try { return localStorage.getItem('dani_gap_marco') === 'ley21719' ? 'ley21719' : 'iso27001'; } catch { return 'iso27001'; } });
+  const esISO = marco === 'iso27001';
   const [currentPhase, setCurrentPhase] = useState(0);
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [showAllPhases, setShowAllPhases] = useState(false);
@@ -55,6 +58,13 @@ function GapAnalysisScreen({ onNavigate }) {
   const [aiResults, setAiResults] = useState(() => { try { return JSON.parse(localStorage.getItem('dani_gap_ai_results') || '{}'); } catch { return {}; } });
 
   useEffect(() => { try { localStorage.setItem('dani_gap_answers', JSON.stringify(answers)); } catch {} }, [answers]);
+  useEffect(() => {
+    try { localStorage.setItem('dani_gap_marco', marco); } catch {}
+    setCurrentPhase(0); setCurrentQuestion(0);
+    setEvalError(null); setEvalInfo(null);
+    // La Ley 21.719 no tiene SOA ni la vista de Resultados ISO.
+    if (!esISO && (activeMainTab === 'soa' || activeMainTab === 'resultados')) setActiveMainTab('assessment');
+  }, [marco]);
   useEffect(() => { try { localStorage.setItem('dani_gap_ai_results', JSON.stringify(aiResults)); } catch {} }, [aiResults]);
 
   // Reintenta varias veces antes de rendirse: en el plan gratuito de Render el
@@ -82,16 +92,9 @@ function GapAnalysisScreen({ onNavigate }) {
   const clauseNum = (codigo) => (codigo || '').split('.')[0];
   const categoryOf = (q) => String(q.categoria || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 
-  const isPrivacyQuestion = (q) => {
-    const category = categoryOf(q);
-    return category.includes('privacidad') || category.includes('proteccion de datos') ||
-      category.includes('datos personales') || category.includes('rgpd') ||
-      category.includes('gdpr') || category.includes('tratamiento') ||
-      /\bley\s*21[.\s]*719\b/.test(category) || /\bley\s*21719\b/.test(category);
-  };
-
-  const isISOCategory = (q, fragment) => !isPrivacyQuestion(q) && categoryOf(q).includes(fragment);
-  const isClause = (q) => !isPrivacyQuestion(q) && categoryOf(q).startsWith('clausula');
+  const isISOCategory = (q, fragment) => categoryOf(q).includes(fragment);
+  const isClause = (q) => categoryOf(q).startsWith('clausula');
+  const marcoQuestions = useMemo(() => dbQuestions.filter((q) => (q.marco || 'iso27001') === marco), [dbQuestions, marco]);
 
   const phaseDefs = [
     { id: 'context',  name: 'Contexto y Liderazgo', clause: 'Cláusulas 4 y 5', icon: Building2, color: '#3b82f6', match: (q) => isClause(q) && ['4', '5'].includes(clauseNum(q.codigo)) },
@@ -101,13 +104,13 @@ function GapAnalysisScreen({ onNavigate }) {
     { id: 'people',   name: 'Anexo A — Personas', clause: 'Controles A.6', icon: Users, color: '#ec4899', match: (q) => isISOCategory(q, 'persona') },
     { id: 'phys',     name: 'Anexo A — Físico', clause: 'Controles A.7', icon: Lock, color: '#06b6d4', match: (q) => isISOCategory(q, 'fisic') },
     { id: 'tech',     name: 'Anexo A — Tecnológico', clause: 'Controles A.8', icon: Globe, color: '#8b5cf6', match: (q) => isISOCategory(q, 'tecnologic') },
-    { id: 'ley',      name: 'Ley 21.719 — Privacidad', clause: 'Protección de Datos', icon: Eye, color: '#14b8a6', match: isPrivacyQuestion },
   ];
 
   const phases = useMemo(() => {
     const matchedIds = new Set();
-    const result = phaseDefs.map((def) => {
-      const matched = dbQuestions.filter((q) => !matchedIds.has(q.id) && def.match(q)).sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0));
+    // ISO: fases por cláusula y dominio del Anexo A. Ley: una fase por categoría (obligación).
+    const result = (esISO ? phaseDefs : []).map((def) => {
+      const matched = marcoQuestions.filter((q) => !matchedIds.has(q.id) && def.match(q)).sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0));
       matched.forEach((q) => matchedIds.add(q.id));
       return {
         id: def.id, name: def.name, clause: def.clause, icon: def.icon, color: def.color,
@@ -117,9 +120,9 @@ function GapAnalysisScreen({ onNavigate }) {
           critical: isClause(q), evidencia: q.evidencia_esperada,
         })),
       };
-    }).filter((p) => p.id === 'ley' || p.questions.length > 0);
+    }).filter((p) => p.questions.length > 0);
 
-    const unmatchedQuestions = dbQuestions.filter((q) => !matchedIds.has(q.id));
+    const unmatchedQuestions = marcoQuestions.filter((q) => !matchedIds.has(q.id));
     const byCat = {};
     unmatchedQuestions.forEach((q) => {
       const cat = q.categoria || 'General';
@@ -129,14 +132,14 @@ function GapAnalysisScreen({ onNavigate }) {
     Object.entries(byCat).forEach(([cat, qs]) => {
       qs.sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0));
       result.push({
-        id: `extra-${cat.toLowerCase().replace(/\s+/g, '-')}`, name: cat, clause: `${qs.length} preguntas`, icon: FileCheck, color: '#6366f1',
+        id: `extra-${cat.toLowerCase().replace(/\s+/g, '-')}`, name: cat, clause: `${qs.length} preguntas`, icon: esISO ? FileCheck : Eye, color: esISO ? '#6366f1' : '#14b8a6',
         questions: qs.map((q) => ({
           id: q.id, title: `${q.codigo} — ${q.nombre}`, question: q.pregunta, codigo: q.codigo, options: [tText.yes, tText.partially, tText.no], critical: false, evidencia: q.evidencia_esperada,
         })),
       });
     });
     return result;
-  }, [dbQuestions, language]);
+  }, [marcoQuestions, esISO, language]);
 
   const loadISOControls = async () => {
     setIsLoading(true);
@@ -277,7 +280,7 @@ function GapAnalysisScreen({ onNavigate }) {
 
     setIsEvaluating(true); setEvalProgress(null);
     try {
-      const resp = await assessmentQuestionsAPI.evaluate([], ids, selectedEvidenceIds, null, setEvalProgress);
+      const resp = await assessmentQuestionsAPI.evaluate(marco, [], ids, selectedEvidenceIds, null, setEvalProgress);
       
       // 1. Mapeo de respuestas a la vista de preguntas
       const newAnswers = { ...answers };
@@ -287,6 +290,9 @@ function GapAnalysisScreen({ onNavigate }) {
         newAI[r.id] = { veredicto: r.veredicto, confianza: r.confianza, justificacion: r.justificacion };
       });
       setAnswers(newAnswers); setAiResults(newAI);
+      const marcoLabel = esISO ? 'ISO 27001' : 'Ley 21.719';
+
+      if (esISO) {
 
       const questionMap = {};
       phases.forEach(p => p.questions.forEach(q => { questionMap[q.id] = q.codigo; }));
@@ -311,22 +317,16 @@ function GapAnalysisScreen({ onNavigate }) {
       });
       setControls(updatedControls);
       try { await complianceAPI.fullAssessment({ controls: updatedControls, answers: newAnswers }); await loadAnalysis(); } catch(e) {}
-      let tratamientosAgregados = 0;
-      if (resp.extracted_treatments && resp.extracted_treatments.length > 0) {
-        try {
-            const token = localStorage.getItem('token');
-            await fetch(`${API_URL}/api/treatments/bulk`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify(resp.extracted_treatments) });
-            tratamientosAgregados = resp.extracted_treatments.length;
-        } catch(e) {}
       }
 
       // 5. Informe final visual
-      let finalMsg = `✅ Se revisaron ${resp.total} preguntas y se actualizaron los controles de la SOA.\n`;
+      let finalMsg = esISO
+        ? `✅ Se revisaron ${resp.total} preguntas de ${marcoLabel} y se actualizaron los controles de la SOA.\n`
+        : `✅ Se revisaron ${resp.total} preguntas de ${marcoLabel}.\n`;
       if (typeof resp.evaluated_with_ai === 'number' && resp.evaluated_with_ai < resp.total) {
         finalMsg += `La IA analizó en detalle ${resp.evaluated_with_ai} preguntas relacionadas con tus documentos; las otras ${resp.total - resp.evaluated_with_ai} quedaron como "sin evidencia".\n`;
       }
       finalMsg += '\n';
-      if (tratamientosAgregados > 0) finalMsg += `🎯 Extrajo ${tratamientosAgregados} tratamientos nuevos y los inyectó en tu registro RoPA!\n`;
       alert(finalMsg); setEvalInfo(finalMsg);
     } catch (e) {
       setEvalError(e.message || 'Error al evaluar con IA.');
@@ -490,8 +490,11 @@ function GapAnalysisScreen({ onNavigate }) {
   const QuestionsAdminView = () => {
     const [showModal, setShowModal] = useState(false);
     const [editingQ, setEditingQ] = useState(null);
-    const [formData, setFormData] = useState({ codigo: '', categoria: 'Organizacional', nombre: '', pregunta: '', evidencia_esperada: '', orden: 0 });
+    const categoriaInicial = esISO ? 'Organizacional' : '';
+    const [formData, setFormData] = useState({ codigo: '', categoria: categoriaInicial, nombre: '', pregunta: '', evidencia_esperada: '', orden: 0 });
     const [isSavingQ, setIsSavingQ] = useState(false);
+    const marcoLabel = esISO ? 'ISO 27001:2022' : 'Ley 21.719';
+    const categoriasLey = Array.from(new Set(marcoQuestions.map((q) => q.categoria).filter(Boolean)));
     const [importing, setImporting] = useState(false);
     const [importResult, setImportResult] = useState(null);
 
@@ -502,7 +505,7 @@ function GapAnalysisScreen({ onNavigate }) {
       setImporting(true);
       setImportResult(null);
       try {
-        const res = await assessmentQuestionsAPI.bulkImport(file);
+        const res = await assessmentQuestionsAPI.bulkImport(file, marco);
         setImportResult(res);
         await loadQuestions();
       } catch (err) {
@@ -519,7 +522,7 @@ function GapAnalysisScreen({ onNavigate }) {
       setImporting(true);
       setImportResult(null);
       try {
-        const res = await assessmentQuestionsAPI.bulkImportPdf(file);
+        const res = await assessmentQuestionsAPI.bulkImportPdf(file, marco);
         setImportResult(res);
         await loadQuestions();
       } catch (err) {
@@ -540,7 +543,7 @@ function GapAnalysisScreen({ onNavigate }) {
         setFormData({ codigo: q.codigo, categoria: q.categoria, nombre: q.nombre, pregunta: q.pregunta, evidencia_esperada: q.evidencia_esperada || '', orden: q.orden });
       } else {
         setEditingQ(null);
-        setFormData({ codigo: '', categoria: 'Organizacional', nombre: '', pregunta: '', evidencia_esperada: '', orden: 0 });
+        setFormData({ codigo: '', categoria: categoriaInicial, nombre: '', pregunta: '', evidencia_esperada: '', orden: 0 });
       }
       setShowModal(true);
     };
@@ -549,8 +552,9 @@ function GapAnalysisScreen({ onNavigate }) {
       e.preventDefault();
       setIsSavingQ(true);
       try {
-        if (editingQ) await assessmentQuestionsAPI.update(editingQ, formData);
-        else await assessmentQuestionsAPI.create(formData);
+        const datos = { ...formData, marco };
+        if (editingQ) await assessmentQuestionsAPI.update(editingQ, datos);
+        else await assessmentQuestionsAPI.create(datos);
         await loadQuestions();
         setShowModal(false);
       } catch (err) { alert("Error al guardar la pregunta: " + err.message); } finally { setIsSavingQ(false); }
@@ -565,19 +569,19 @@ function GapAnalysisScreen({ onNavigate }) {
       <div style={{ marginTop: '24px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '20px' }}>
           <div>
-            <h2 style={{ fontSize: '20px', fontWeight: 700, color: t.text }}>Configuración del Cuestionario</h2>
-            <p style={{ fontSize: '13px', color: t.textDim }}>Agrega, edita o elimina preguntas de la base de evaluación ISO 27001 y Ley 21.719.</p>
+            <h2 style={{ fontSize: '20px', fontWeight: 700, color: t.text }}>Preguntas de {marcoLabel}</h2>
+            <p style={{ fontSize: '13px', color: t.textDim }}>Lo que importes o crees aquí queda en el banco de <strong>{marcoLabel}</strong>. Para cargar preguntas del otro marco, cámbialo arriba en "Evaluar contra".</p>
           </div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
           <button onClick={handleDownloadTemplate} title="Descargar plantilla Excel" style={{ padding: '10px 16px', background: 'transparent', border: `1px solid ${t.border}`, borderRadius: '8px', color: t.text, fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
             <Download size={16} /> Plantilla
           </button>
           <label title="Importar preguntas desde Excel (.xlsx)" style={{ padding: '10px 16px', background: 'transparent', border: `1px solid #004ac6`, borderRadius: '8px', color: '#004ac6', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px', cursor: importing ? 'wait' : 'pointer' }}>
-            <FolderUp size={16} /> {importing ? 'Importando…' : 'Importar Excel'}
+            <FolderUp size={16} /> {importing ? 'Importando…' : `Importar Excel a ${esISO ? 'ISO' : 'Ley'}`}
             <input type="file" accept=".xlsx,.xlsm" onChange={handleImportExcel} disabled={importing} style={{ display: 'none' }} />
           </label>
           <label title="Importar preguntas desde un PDF (checklist/listado)" style={{ padding: '10px 16px', background: 'transparent', border: `1px solid #004ac6`, borderRadius: '8px', color: '#004ac6', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px', cursor: importing ? 'wait' : 'pointer' }}>
-            <FileText size={16} /> {importing ? 'Importando…' : 'Importar PDF'}
+            <FileText size={16} /> {importing ? 'Importando…' : `Importar PDF a ${esISO ? 'ISO' : 'Ley'}`}
             <input type="file" accept=".pdf" onChange={handleImportPdf} disabled={importing} style={{ display: 'none' }} />
           </label>
           <button onClick={() => handleOpenModal()} style={{ padding: '10px 16px', background: '#004ac6', border: 'none', borderRadius: '8px', color: 'white', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
@@ -592,7 +596,7 @@ function GapAnalysisScreen({ onNavigate }) {
               <span style={{ color: '#ef4444' }}>❌ {importResult.error}</span>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                <span><strong style={{ color: '#004ac6' }}>✓ {importResult.creadas}</strong> preguntas creadas · <strong>{importResult.omitidas}</strong> omitidas (de {importResult.total_filas_datos ?? importResult.total_detectadas} detectadas).</span>
+                <span><strong style={{ color: '#004ac6' }}>✓ {importResult.creadas}</strong> preguntas creadas en {marcoLabel} · <strong>{importResult.omitidas}</strong> omitidas (de {importResult.total_filas_datos ?? importResult.total_detectadas} detectadas).</span>
                 {importResult.columnas_detectadas && (
                   <span style={{ color: t.textDim, fontSize: '12px' }}>
                     Columnas detectadas: {Object.entries(importResult.columnas_detectadas).map(([k, v]) => `${k} ← "${v}"`).join('  ·  ')}
@@ -619,7 +623,10 @@ function GapAnalysisScreen({ onNavigate }) {
               </tr>
             </thead>
             <tbody>
-              {dbQuestions.map(q => (
+              {marcoQuestions.length === 0 && (
+                <tr><td colSpan={4} style={{ padding: '24px 20px', textAlign: 'center', fontSize: '13px', color: t.textDim }}>Todavía no hay preguntas de {marcoLabel}. Impórtalas desde Excel o PDF, o crea una nueva.</td></tr>
+              )}
+              {marcoQuestions.map(q => (
                 <tr key={q.id} style={{ borderBottom: `1px solid ${t.border}` }}>
                   <td style={{ padding: '14px 20px', fontWeight: 600, color: '#8b5cf6', fontSize: '13px' }}>{q.codigo}</td>
                   <td style={{ padding: '14px 20px', fontSize: '13px', color: t.textDim }}>{q.categoria}</td>
@@ -643,15 +650,16 @@ function GapAnalysisScreen({ onNavigate }) {
         {showModal && (
           <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
             <div style={{ background: t.cardBg, borderRadius: '16px', padding: '24px', width: '600px', maxWidth: '90%' }}>
-              <h3 style={{ marginBottom: '16px', fontSize: '18px', color: t.text }}>{editingQ ? 'Editar Pregunta' : 'Nueva Pregunta'}</h3>
+              <h3 style={{ marginBottom: '16px', fontSize: '18px', color: t.text }}>{editingQ ? 'Editar Pregunta' : 'Nueva Pregunta'} · {marcoLabel}</h3>
               <form onSubmit={handleSaveQuestion} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
                   <div>
-                    <label style={{ fontSize: '12px', color: t.textDim, marginBottom: '4px', display: 'block' }}>Código (Ej. 4.1 o A.5.1)</label>
+                    <label style={{ fontSize: '12px', color: t.textDim, marginBottom: '4px', display: 'block' }}>Código {esISO ? '(Ej. 4.1 o A.5.1)' : '(Ej. L21719-O3)'}</label>
                     <input required value={formData.codigo} onChange={e => setFormData({...formData, codigo: e.target.value})} style={{ width: '100%', padding: '10px', background: t.inputBg, border: `1px solid ${t.border}`, borderRadius: '8px', color: t.text, boxSizing: 'border-box' }} />
                   </div>
                   <div>
                     <label style={{ fontSize: '12px', color: t.textDim, marginBottom: '4px', display: 'block' }}>Categoría</label>
+                    {esISO ? (
                     <select required value={formData.categoria} onChange={e => setFormData({...formData, categoria: e.target.value})} style={{ width: '100%', padding: '10px', background: t.inputBg, border: `1px solid ${t.border}`, borderRadius: '8px', color: t.text, boxSizing: 'border-box' }}>
                       <option value="Cláusula 4">Cláusula 4</option>
                       <option value="Cláusula 5">Cláusula 5</option>
@@ -664,8 +672,13 @@ function GapAnalysisScreen({ onNavigate }) {
                       <option value="Personas">Anexo A - Personas</option>
                       <option value="Físico">Anexo A - Físico</option>
                       <option value="Tecnológico">Anexo A - Tecnológico</option>
-                      <option value="Privacidad">Ley 21.719 - Privacidad</option>
                     </select>
+                    ) : (
+                      <>
+                        <input required list="categorias-ley" placeholder="Ej. Derechos de los titulares" value={formData.categoria} onChange={e => setFormData({...formData, categoria: e.target.value})} style={{ width: '100%', padding: '10px', background: t.inputBg, border: `1px solid ${t.border}`, borderRadius: '8px', color: t.text, boxSizing: 'border-box' }} />
+                        <datalist id="categorias-ley">{categoriasLey.map((c) => <option key={c} value={c} />)}</datalist>
+                      </>
+                    )}
                   </div>
                 </div>
                 <div>
@@ -699,7 +712,24 @@ function GapAnalysisScreen({ onNavigate }) {
       <section className="gap-header" style={{ marginBottom: '16px' }}>
         <p style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '1px', color: '#2563eb', textTransform: 'uppercase', marginBottom: '2px' }}>Cumplimiento Normativo</p>
         <h1 style={{ fontSize: '24px', fontWeight: 800, lineHeight: 1.1, margin: 0, color: t.text, letterSpacing: '-0.5px' }}>{tText.gapAnalysis}</h1>
-        <p style={{ margin: '4px 0 0', fontSize: '12px', lineHeight: 1.4, color: t.textDim }}>{tText.completeAssessment}</p>
+        <p style={{ margin: '4px 0 0', fontSize: '12px', lineHeight: 1.4, color: t.textDim }}>{esISO ? tText.completeAssessment : 'Evalúa tus documentos contra las obligaciones de la Ley 21.719 de Protección de Datos Personales'}</p>
+      </section>
+
+      {/* MARCO NORMATIVO: la IA evalúa uno a la vez */}
+      <section aria-label="Marco normativo" style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '14px' }}>
+        <span style={{ fontSize: '12px', fontWeight: 600, color: t.textDim }}>Evaluar contra:</span>
+        <div role="radiogroup" style={{ display: 'inline-flex', gap: '4px', background: t.inputBg, padding: '4px', borderRadius: '12px', border: `1px solid ${t.border}` }}>
+          {[{ id: 'iso27001', label: 'ISO 27001:2022', Icon: Shield }, { id: 'ley21719', label: 'Ley 21.719', Icon: Eye }].map(({ id, label, Icon }) => {
+            const activo = marco === id;
+            const n = dbQuestions.filter((q) => (q.marco || 'iso27001') === id).length;
+            return (
+              <button key={id} type="button" role="radio" aria-checked={activo} disabled={isEvaluating} onClick={() => setMarco(id)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 14px', borderRadius: '9px', border: 'none', background: activo ? '#004ac6' : 'transparent', color: activo ? '#fff' : t.textMuted, fontSize: '12px', fontWeight: 700, cursor: isEvaluating ? 'not-allowed' : 'pointer' }}>
+                <Icon size={14} />{label}<span style={{ fontWeight: 500, opacity: .8 }}>({n})</span>
+              </button>
+            );
+          })}
+        </div>
       </section>
 
       {/* PESTAÑAS NAVEGABLES (SCROLL HORIZONTAL MÓVIL) */}
@@ -707,8 +737,7 @@ function GapAnalysisScreen({ onNavigate }) {
         <div className="gap-tabs no-scrollbar" style={{ display: 'flex', alignItems: 'center', gap: '6px', overflowX: 'auto', background: t.inputBg, padding: '4px', borderRadius: '12px', border: `1px solid ${t.border}`, flexShrink: 1 }}>
           {[
             { id: 'assessment', label: 'Evaluación' },
-            { id: 'soa', label: 'SOA' },
-            { id: 'resultados', label: 'Resultados', Icon: Activity },
+            ...(esISO ? [{ id: 'soa', label: 'SOA' }, { id: 'resultados', label: 'Resultados', Icon: Activity }] : []),
             ...(isAdmin && window.innerWidth > 768 ? [{ id: 'admin-questions', label: 'Preguntas', Icon: Settings }] : []),
           ].map(({ id, label, Icon }) => (
             <button key={id} type="button" onClick={() => setActiveMainTab(id)} aria-current={activeMainTab === id ? 'page' : undefined}

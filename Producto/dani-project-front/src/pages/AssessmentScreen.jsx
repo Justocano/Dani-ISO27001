@@ -46,9 +46,9 @@ const AssessmentScreen = () => {
     return groups;
   };
 
-  // Separar preguntas ISO de las de Privacidad/Ley 21.719
-  const isoQuestions = questions.filter(q => !q.categoria.includes('Privacidad') && !q.categoria.includes('Ley 21.719'));
-  const privacyQuestions = questions.filter(q => q.categoria.includes('Privacidad') || q.categoria.includes('Ley 21.719'));
+  // Cada pregunta pertenece a un marco normativo (campo "marco" en la BD)
+  const isoQuestions = questions.filter(q => (q.marco || 'iso27001') === 'iso27001');
+  const privacyQuestions = questions.filter(q => q.marco === 'ley21719');
 
   const isoGroups = groupQuestions(isoQuestions);
   const privacyGroups = groupQuestions(privacyQuestions);

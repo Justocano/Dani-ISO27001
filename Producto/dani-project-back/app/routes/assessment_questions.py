@@ -9,7 +9,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.database import get_db
@@ -38,10 +38,25 @@ except ImportError:
     PdfReader = None
 
 router = APIRouter(prefix="/api/assessment-questions", tags=["Assessment Questions"])
+
+# Marcos normativos. Cada pregunta pertenece a uno solo y la IA evalúa uno a la vez.
+MARCOS = {"iso27001": "ISO 27001:2022", "ley21719": "Ley 21.719"}
+
+
+def _validar_marco(marco: Optional[str], obligatorio: bool = True) -> Optional[str]:
+    m = (marco or "").strip().lower()
+    if not m:
+        if obligatorio:
+            raise HTTPException(status_code=400, detail="Debes indicar el marco: 'iso27001' o 'ley21719'.")
+        return None
+    if m not in MARCOS:
+        raise HTTPException(status_code=400, detail=f"Marco '{marco}' no válido. Usa 'iso27001' o 'ley21719'.")
+    return m
 ai_service = AIService()
 
 class QuestionResponse(BaseModel):
     id: str
+    marco: str = "iso27001"
     codigo: str
     categoria: str
     nombre: str
@@ -51,6 +66,7 @@ class QuestionResponse(BaseModel):
     class Config: from_attributes = True
 
 class QuestionCreate(BaseModel):
+    marco: str = "iso27001"
     codigo: str
     categoria: str
     nombre: str
@@ -59,6 +75,7 @@ class QuestionCreate(BaseModel):
     orden: int = 0
 
 class QuestionUpdate(BaseModel):
+    marco: Optional[str] = None
     codigo: Optional[str] = None
     categoria: Optional[str] = None
     nombre: Optional[str] = None
@@ -76,8 +93,10 @@ class AnswerResponse(BaseModel):
     class Config: from_attributes = True
 
 @router.get("/", response_model=List[QuestionResponse])
-async def get_questions(categoria: Optional[str] = None, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_questions(categoria: Optional[str] = None, marco: Optional[str] = None, current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(AssessmentQuestion)
+    marco = _validar_marco(marco, obligatorio=False)
+    if marco: stmt = stmt.where(AssessmentQuestion.marco == marco)
     if categoria: stmt = stmt.where(AssessmentQuestion.categoria == categoria)
     stmt = stmt.order_by(AssessmentQuestion.orden)
     result = await db.execute(stmt)
@@ -85,6 +104,7 @@ async def get_questions(categoria: Optional[str] = None, current_user: dict = De
 
 @router.post("/", response_model=QuestionResponse)
 async def create_question(data: QuestionCreate, current_user: dict = Depends(RequireRole(["admin"])), db: AsyncSession = Depends(get_db)):
+    data.marco = _validar_marco(data.marco)
     new_q = AssessmentQuestion(**data.model_dump(exclude_unset=True))
     db.add(new_q)
     await db.commit()
@@ -95,7 +115,9 @@ async def create_question(data: QuestionCreate, current_user: dict = Depends(Req
 async def update_question(q_id: str, data: QuestionUpdate, current_user: dict = Depends(RequireRole(["admin"])), db: AsyncSession = Depends(get_db)):
     q = (await db.execute(select(AssessmentQuestion).where(AssessmentQuestion.id == q_id))).scalar_one_or_none()
     if not q: raise HTTPException(status_code=404, detail="Pregunta no encontrada")
-    for key, value in data.model_dump(exclude_unset=True).items(): setattr(q, key, value)
+    cambios = data.model_dump(exclude_unset=True)
+    if "marco" in cambios: cambios["marco"] = _validar_marco(cambios["marco"])
+    for key, value in cambios.items(): setattr(q, key, value)
     await db.commit()
     await db.refresh(q)
     return q
@@ -104,6 +126,8 @@ async def update_question(q_id: str, data: QuestionUpdate, current_user: dict = 
 async def delete_question(q_id: str, current_user: dict = Depends(RequireRole(["admin"])), db: AsyncSession = Depends(get_db)):
     q = (await db.execute(select(AssessmentQuestion).where(AssessmentQuestion.id == q_id))).scalar_one_or_none()
     if not q: raise HTTPException(status_code=404, detail="Pregunta no encontrada")
+    # Primero las respuestas de las empresas a esta pregunta (FK); si no, el borrado falla.
+    await db.execute(sa_delete(AssessmentAnswer).where(AssessmentAnswer.question_id == q_id))
     await db.delete(q)
     await db.commit()
     return {"message": "Eliminada"}
@@ -166,10 +190,12 @@ def _mapear_columnas(headers: list) -> dict:
 @router.post("/bulk-import")
 async def bulk_import_questions(
     file: UploadFile = File(...),
+    marco: str = Form(...),
     current_user: dict = Depends(RequireRole(["admin"])),
     db: AsyncSession = Depends(get_db),
 ):
-    """Carga masiva de preguntas desde un Excel (.xlsx). Tolerante a nombres de columna distintos."""
+    """Carga masiva de preguntas desde un Excel (.xlsx) a un marco (ISO o Ley). Tolerante a nombres de columna distintos."""
+    marco = _validar_marco(marco)
     nombre_archivo = (file.filename or "").lower()
     if not nombre_archivo.endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="El archivo debe ser un Excel (.xlsx).")
@@ -214,7 +240,7 @@ async def bulk_import_questions(
         return v or None
 
     existentes = set()
-    res_prev = await db.execute(select(AssessmentQuestion.codigo, AssessmentQuestion.pregunta))
+    res_prev = await db.execute(select(AssessmentQuestion.codigo, AssessmentQuestion.pregunta).where(AssessmentQuestion.marco == marco))
     for cod, preg in res_prev.all():
         existentes.add((_normalizar(cod), _normalizar(preg)))
 
@@ -250,7 +276,7 @@ async def bulk_import_questions(
             continue
 
         db.add(AssessmentQuestion(
-            codigo=codigo, categoria=categoria, nombre=nombre,
+            marco=marco, codigo=codigo, categoria=categoria, nombre=nombre,
             pregunta=pregunta, evidencia_esperada=evidencia, orden=orden,
         ))
         nuevas_en_lote.add(clave)
@@ -261,6 +287,7 @@ async def bulk_import_questions(
 
     columnas_detectadas = {campo: headers[idx] for campo, idx in mapeo.items() if idx < len(headers)}
     return {
+        "marco": marco,
         "creadas": creadas,
         "omitidas": omitidas,
         "total_filas_datos": creadas + omitidas,
@@ -337,11 +364,13 @@ def _parsear_preguntas_pdf(texto: str):
 @router.post("/bulk-import-pdf")
 async def bulk_import_questions_pdf(
     file: UploadFile = File(...),
+    marco: str = Form(...),
     categoria_forzada: Optional[str] = Form(None),
     current_user: dict = Depends(RequireRole(["admin"])),
     db: AsyncSession = Depends(get_db),
 ):
-    """Carga masiva de preguntas desde un PDF (checklist/listado). Detecta categorías e ítems."""
+    """Carga masiva de preguntas desde un PDF (checklist/listado) a un marco (ISO o Ley). Detecta categorías e ítems."""
+    marco = _validar_marco(marco)
     if PdfReader is None:
         raise HTTPException(status_code=500, detail="Falta la dependencia 'pypdf' en el servidor.")
 
@@ -372,7 +401,7 @@ async def bulk_import_questions_pdf(
     prefijo = re.sub(r"[^A-Za-z0-9]", "", os.path.splitext(os.path.basename(nombre_archivo))[0])[:8].upper() or "PDF"
 
     preguntas_existentes = set()
-    res_prev = await db.execute(select(AssessmentQuestion.pregunta))
+    res_prev = await db.execute(select(AssessmentQuestion.pregunta).where(AssessmentQuestion.marco == marco))
     for (preg,) in res_prev.all():
         preguntas_existentes.add(_normalizar(preg))
 
@@ -391,6 +420,7 @@ async def bulk_import_questions_pdf(
             omitidas += 1
             continue
         db.add(AssessmentQuestion(
+            marco=marco,
             codigo=codigo,
             categoria=cat,
             nombre=texto_item[:60],
@@ -406,6 +436,7 @@ async def bulk_import_questions_pdf(
         await db.commit()
 
     return {
+        "marco": marco,
         "creadas": creadas,
         "omitidas": omitidas,
         "total_detectadas": len(items),
@@ -432,9 +463,9 @@ async def bulk_template(current_user: dict = Depends(RequireRole(["admin"]))):
         "Documento de política firmado por la dirección", 1,
     ])
     ws.append([
-        "O1", "Privacidad", "Registro de tratamientos (RoPA)",
-        "¿Existe un registro de actividades de tratamiento de datos personales?",
-        "Inventario RoPA actualizado", 2,
+        "A.5.2", "Organizacional", "Roles y responsabilidades",
+        "¿Están definidos y asignados los roles de seguridad de la información?",
+        "Matriz de responsabilidades o RACI aprobada", 2,
     ])
     buf = io.BytesIO()
     wb.save(buf)
@@ -478,12 +509,12 @@ def extract_json_from_text(text: str):
             print(f"No se pudo extraer JSON de la respuesta de la IA: {text}")
             return []
 
-# EVALUACIÓN EXHAUSTIVA DE IA Y RoPA AUTOMÁTICA (en segundo plano)
+# EVALUACIÓN CON IA POR MARCO NORMATIVO (en segundo plano)
 # =====================================================================
-# POST /evaluate        -> inicia un job y devuelve {job_id, total}
-# GET  /evaluate/{id}   -> estado: done/total, etapa y, al terminar, el
-#                          mismo resultado que antes {total, results,
-#                          extracted_treatments}
+# POST /evaluate        -> inicia un job para UN marco (iso27001 o ley21719)
+#                          y devuelve {job_id, total}
+# GET  /evaluate/{id}   -> estado: done/total, etapa y, al terminar,
+#                          {marco, total, results, evaluated_with_ai}
 # Ver app/services/question_evaluator.py (filtro por relevancia + contexto
 # por fragmentos + reintentos ante el límite de Groq).
 # =====================================================================
@@ -547,8 +578,8 @@ async def _documentos_guardados(db: AsyncSession, ev_ids: List[str], org_id: str
     return documentos
 
 
-async def _guardar_resultados(db: AsyncSession, org_id: str, preguntas, resultados):
-    """Guarda las respuestas y refleja los veredictos en el SOA (ControlStatus)."""
+async def _guardar_resultados(db: AsyncSession, org_id: str, preguntas, resultados, actualizar_soa: bool = True):
+    """Guarda las respuestas y, si es ISO, refleja los veredictos en el SOA (ControlStatus)."""
     q_ids_res = [str(item.get("id")) for item in resultados if item.get("id")]
     respuestas_existentes = {}
     if q_ids_res:
@@ -574,6 +605,8 @@ async def _guardar_resultados(db: AsyncSession, org_id: str, preguntas, resultad
         else:
             db.add(AssessmentAnswer(question_id=qid, organization_id=org_id, veredicto=veredicto, confianza=confianza, justificacion=item.get("justificacion")))
     await db.commit()
+    if not actualizar_soa:
+        return  # la Ley 21.719 no tiene SOA
 
     # --- Puente hacia el SOA: actualizar el estado de los controles ISO ---
     # Mapeo por código: pregunta "A.5.1" -> control "5.1".
@@ -607,48 +640,7 @@ async def _guardar_resultados(db: AsyncSession, org_id: str, preguntas, resultad
     await db.commit()
 
 
-async def _extraer_ropa(contexto: str):
-    ropa_prompt = f"""Analiza detalladamente este documento y extrae TODAS las Actividades de Tratamiento de Datos Personales (para un Registro RoPA).
-        Documento:
-        {contexto[:8000]}
-
-        Busca información como: gestión de clientes, marketing, recursos humanos, videovigilancia, etc.
-        Para cada tratamiento encontrado, extrae la siguiente información:
-        - "nombre": Nombre descriptivo de la actividad (ej. "Gestión de clientes y facturación").
-        - "finalidad": Para qué se usan los datos.
-        - "base_licitud": La base legal (ej. "ejecución de un contrato", "consentimiento").
-        - "categorias_datos": Qué datos se recopilan (ej. "nombre, RUT, dirección").
-        - "plazo_conservacion": Cuánto tiempo se guardan.
-        - "destinatarios": A quién se comparten los datos (opcional, si se menciona).
-
-        Instrucciones MUY IMPORTANTES:
-        1. Devuelve ÚNICAMENTE un arreglo JSON válido y NADA MÁS.
-        2. No incluyas bloques de código markdown (```json), ni explicaciones.
-        3. Si no encuentras NINGÚN tratamiento, devuelve un arreglo vacío: []
-
-        Ejemplo de formato esperado:
-        [
-          {{
-            "nombre": "Envío de comunicaciones de marketing",
-            "finalidad": "enviar newsletters y promociones",
-            "base_licitud": "consentimiento del titular",
-            "categorias_datos": "nombre y correo electrónico",
-            "plazo_conservacion": "hasta que revoque el consentimiento",
-            "destinatarios": "plataforma de email marketing"
-          }}
-        ]
-        """
-    try:
-        ropa_text = await qe._llamar_con_reintentos(ai_service, ropa_prompt)
-        tratamientos = extract_json_from_text(ropa_text)
-        print(f"Tratamientos extraídos: {len(tratamientos)}")
-        return tratamientos
-    except Exception as e:
-        print(f"Error en la extracción de RoPA: {e}")
-        return []
-
-
-async def _ejecutar_job(job_id: str, org_id: str, preguntas, documentos):
+async def _ejecutar_job(job_id: str, org_id: str, marco: str, preguntas, documentos):
     job = qe.JOBS[job_id]
 
     def progreso(avance: int, etapa):
@@ -658,27 +650,17 @@ async def _ejecutar_job(job_id: str, org_id: str, preguntas, documentos):
 
     try:
         from app.routes.evidence import embedding_service
-        # La extracción RoPA es una sola llamada larga (la IA debe escribir un
-        # JSON con todos los tratamientos). La lanzamos AL INICIO, en paralelo
-        # con las preguntas, para que su tiempo no se sume al final.
-        contexto = "\n\n".join(f"### Documento: {t}\n{x}" for t, x in documentos)
-        tarea_ropa = asyncio.create_task(_extraer_ropa(contexto))
-
         job["stage"] = "Buscando qué preguntas se relacionan con los documentos"
         resultados, enviadas = await qe.evaluar_preguntas(
             ai_service, embedding_service, preguntas, documentos, extract_json_from_text, progreso
         )
-        job["stage"] = "Guardando resultados y actualizando la SOA"
+        job["stage"] = "Guardando resultados y actualizando la SOA" if marco == "iso27001" else "Guardando resultados"
         async with AsyncSessionLocal() as db:
-            await _guardar_resultados(db, org_id, preguntas, resultados)
-
-        if not tarea_ropa.done():
-            job["stage"] = "Terminando de extraer tratamientos (RoPA)"
-        tratamientos = await tarea_ropa
+            await _guardar_resultados(db, org_id, preguntas, resultados, actualizar_soa=(marco == "iso27001"))
 
         job["result"] = {
-            "total": len(resultados), "results": resultados,
-            "extracted_treatments": tratamientos, "evaluated_with_ai": enviadas,
+            "marco": marco, "total": len(resultados), "results": resultados,
+            "evaluated_with_ai": enviadas,
         }
         job["done"] = job["total"]
         job["status"] = "done"
@@ -692,12 +674,14 @@ async def _ejecutar_job(job_id: str, org_id: str, preguntas, documentos):
 @router.post("/evaluate")
 async def evaluate_with_ai(
     files: List[UploadFile] = File(default=None),
+    marco: str = Form(...),        # "iso27001" o "ley21719": la IA evalúa un solo marco
     question_ids: str = Form(""),
     evidence_ids: str = Form(""),  # documentos ya guardados en el Centro de Evidencias
     current_user: dict = Depends(RequireRole(ELEVATED_WRITE)),
     org_id: str = Depends(get_current_org),
     db: AsyncSession = Depends(get_db)
 ):
+    marco = _validar_marco(marco)
     documentos = []
     ev_ids = [x.strip() for x in evidence_ids.split(",") if x.strip()]
     if ev_ids:
@@ -710,16 +694,16 @@ async def evaluate_with_ai(
     if not documentos:
         raise HTTPException(status_code=400, detail="No se pudo extraer texto. Asegúrate de que los PDFs no sean solo imágenes.")
 
-    stmt = select(AssessmentQuestion)
+    stmt = select(AssessmentQuestion).where(AssessmentQuestion.marco == marco)
     ids = [x.strip() for x in question_ids.split(",") if x.strip()]
     if ids:
         stmt = stmt.where(AssessmentQuestion.id.in_(ids))
     preguntas = (await db.execute(stmt.order_by(AssessmentQuestion.orden))).scalars().all()
     if not preguntas:
-        raise HTTPException(status_code=400, detail="No hay preguntas para evaluar.")
+        raise HTTPException(status_code=400, detail=f"No hay preguntas de {MARCOS[marco]} para evaluar. Cárgalas en la pestaña Preguntas.")
 
     job_id = qe.crear_job(org_id, len(preguntas))
-    tarea = asyncio.create_task(_ejecutar_job(job_id, org_id, list(preguntas), documentos))
+    tarea = asyncio.create_task(_ejecutar_job(job_id, org_id, marco, list(preguntas), documentos))
     _jobs_en_curso.add(tarea)
     tarea.add_done_callback(_jobs_en_curso.discard)
     return {"job_id": job_id, "total": len(preguntas)}

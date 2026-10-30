@@ -14,7 +14,7 @@ const Sidebar = ({ activeScreen, setActiveScreen, sidebarCollapsed, setSidebarCo
   const [leyOpen, setLeyOpen] = useState(true);
 
   const ISO_IDS = ['audit-room', 'assessment'];
-  const LEY_IDS = ['treatments', 'consents', 'data-requests', 'breaches', 'vendors', 'impact'];
+  const LEY_IDS = ['breaches'];
 
   useEffect(() => {
     if (ISO_IDS.includes(activeScreen)) setIsoOpen(true);
@@ -44,12 +44,7 @@ const Sidebar = ({ activeScreen, setActiveScreen, sidebarCollapsed, setSidebarCo
     { id: 'documents', label: l.documents, icon: FileText, roles: DASH, group: 'comun' },
     { id: 'audit-room', label: l.auditRoom, icon: FileCheck, roles: ISO_VIEW, group: 'iso' },
     { id: 'assessment', label: language === 'es' ? 'Evaluación ISO' : 'ISO Assessment', icon: ClipboardList, roles: ISO_VIEW, group: 'iso' },
-    { id: 'treatments', label: language === 'es' ? 'Tratamientos (RoPA)' : 'Treatments (RoPA)', icon: ClipboardList, roles: LEY, group: 'ley' },
-    { id: 'consents', label: language === 'es' ? 'Consentimientos' : 'Consents', icon: ClipboardCheck, roles: LEY, group: 'ley' },
-    { id: 'data-requests', label: language === 'es' ? 'Solicitudes de Titulares' : 'Data Requests', icon: Inbox, roles: LEY, group: 'ley' },
     { id: 'breaches', label: language === 'es' ? 'Gestión de Brechas' : 'Data Breaches', icon: ShieldAlert, roles: LEY, group: 'ley' },
-    { id: 'vendors', label: language === 'es' ? 'Proveedores' : 'Vendors', icon: Building2, roles: LEY, group: 'ley' },
-    { id: 'impact', label: language === 'es' ? 'Evaluación de Impacto' : 'Impact Assessment', icon: Shield, roles: LEY, group: 'ley' },
     { id: 'user-management', label: l.userManagement, icon: Users, roles: MANAGE_USERS, group: 'general' },
     { id: 'organizations', label: language === 'es' ? 'Gestión de Empresas' : 'Organizations', icon: Building2, roles: PLATFORM, group: 'general' },
     { id: 'employee-portal', label: language === 'es' ? 'Portal de Empleados' : 'Employee Portal', icon: UserCircle, roles: null, group: 'general' },
