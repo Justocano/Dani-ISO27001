@@ -14,7 +14,6 @@ from app.models.evidence_chunk import EvidenceChunk
 from app.models.normative_chunk import NormativeChunk
 from app.models.gap_analysis import ControlImplementation  # <-- Importación corregida
 from app.models.data_breach import DataBreach
-from app.models.data_treatment import DataTreatment
 
 router = APIRouter(prefix="/api/chat", tags=["Chat IA"])
 ai_service = AIService()
@@ -59,15 +58,11 @@ async def chat_endpoint(
         breaches = (await db.execute(select(DataBreach).where(DataBreach.organization_id == org_id))).scalars().all()
         breaches_activas = [b for b in breaches if b.estado not in ['notificada', 'cerrada']]
         
-        # C) Resumen de Tratamientos RoPA
-        treatments = (await db.execute(select(DataTreatment).where(DataTreatment.organization_id == org_id))).scalars().all()
-        
         live_data = f"""
         --- CONTEXTO EN VIVO DE LA EMPRESA DEL USUARIO ---
         Progreso de Cumplimiento ISO 27001: {score}%
         Controles aplicables: {len(applies)} | Implementados: {len(implemented)}
         Brechas de Datos Registradas: {len(breaches)} en total | {len(breaches_activas)} activas.
-        Tratamientos RoPA Registrados: {len(treatments)}
         ---------------------------------------------------
         """
         context_blocks.append(live_data)
